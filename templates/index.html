@@ -135,6 +135,29 @@
       <p class="hint">每个融合带至少 2 个严格递增的采样点；<b>左</b>=左机单侧实测亮度、<b>右</b>=右机单侧实测亮度（cd/m²）。端点权重固定为左 (1,0)、右 (0,1)。</p>
     </section>
 
+    <!-- 布线规划面板 -->
+    <section class="card mode-blend" id="cableCard">
+      <h2>投影机布线规划（安装点通过拼接校核后）</h2>
+      <label class="chk"><input type="checkbox" id="cableEnabled"> 启用布线规划</label>
+      <p class="hint">为每台设备指定<b>通道接入口</b>与<b>最长线缆</b>，系统规划“安装点→接入口”避障接入段，再沿相交通道中心线到机柜；接入段与通道不得穿过禁装区、机柜或其他设备的机身检修包络；线缆共用通道但占用数不超容量。</p>
+      <div id="cableEditor" hidden>
+        <div class="cable-tools">
+          <button type="button" id="drawChannelBtn" title="在顶视图拖拽绘制走线通道（矩形）">▭ 绘制通道</button>
+          <button type="button" id="drawCabinetBtn" title="在顶视图拖拽绘制机柜（矩形）">▣ 绘制机柜</button>
+          <button type="button" id="delChannelBtn" class="danger" disabled>🗑 删除通道</button>
+        </div>
+        <div id="cableChannelList" class="cable-channel-list"></div>
+        <div class="form-grid" id="cableCabinetGrid" hidden>
+          <label>机柜 X<input type="number" id="cabX" step="0.1" min="0"></label>
+          <label>机柜 Y<input type="number" id="cabY" step="0.1" min="0"></label>
+          <label>机柜宽 (m)<input type="number" id="cabW" step="0.1" min="0.1"></label>
+          <label>机柜深 (m)<input type="number" id="cabH" step="0.1" min="0.1"></label>
+        </div>
+        <div id="cableDevList"></div>
+        <p class="hint">顶视图：浅灰宽带=可走线通道（虚线为中心线、红段=被阻断）、紫色实心框=机柜；彩线=接入段，深色实线=通道段，彩色菱形=接入口（可拖动）。</p>
+      </div>
+    </section>
+
     <section class="card">
       <h2>禁装区（顶视图）</h2>
       <ul id="obstacleList" class="obstacle-list"></ul>

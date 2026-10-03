@@ -17,6 +17,8 @@ const state = {
   lensHeight: 1.55,               // 单机：镜头高度
   showAll: true,
   drawMode: false,
+  drawChannelMode: false,        // 拼接布线：正在顶视图绘制走线通道
+  drawCabinetMode: false,        // 拼接布线：正在顶视图绘制机柜
   blendTemplate: null,            // 示例携带的拼接配置（切换到拼接模式时取用）
   calTemplate: null,              // 示例携带的校准配置
   calEnabled: false,              // 是否启用画面融合校准
@@ -26,6 +28,14 @@ const state = {
     selectedIdx: 0,
   },
   calSamples: [],                 // [[{u,left,right}] × (N-1)]，仅在启用校准时提交
+  cableEnabled: false,            // 是否启用投影机布线规划
+  cableTemplate: null,            // 示例携带的布线配置
+  cable: {
+    cabinet: null,                // {id,x,y,w,h}
+    channels: [],                 // [{id,name,x,y,w,h,capacity}]
+    selectedChannelId: null,
+    devices: [],                  // [{access:{x,y}, maxLength}] × N，与 segments 对齐
+  },
 };
 
 let result = null;                // 最近一次单机计算结果
@@ -33,6 +43,7 @@ let resultById = {};
 let blendResult = null;           // 最近一次拼接联合计算结果
 let blendError = null;            // 最近一次拼接/校准的 400 错误
 let calResult = null;             // 最近一次画面融合校准结果
+let cableResult = null;           // 最近一次布线规划结果（cabling 部分）
 let drag = null;                  // 当前拖拽会话
 let examples = [];
 
@@ -134,6 +145,7 @@ function sanitize() {
     state.calTarget.luminance = clamp(state.calTarget.luminance ?? 255, 1, 100000);
     state.calTarget.tolerance = clamp(state.calTarget.tolerance ?? 15, 0, 100000);
     if (state.calEnabled) syncCalSamples();
+    syncCabling(blendSegs().length);
   }
 }
 
@@ -186,6 +198,113 @@ function calSamplesPayload() {
   return state.calSamples;
 }
 
+/* ================= 布线规划状态 ================= */
+function spineOf(ch) {
+  /* 通道矩形中心线：沿长边方向；等宽深时取水平。返回 {kind, p0, p1}。 */
+  if (ch.w + 1e-9 >= ch.h) {
+    const cy = ch.y + ch.h / 2;
+    return { kind: 'H', p0: { x: ch.x, y: cy }, p1: { x: ch.x + ch.w, y: cy } };
+  }
+  const cx = ch.x + ch.w / 2;
+  return { kind: 'V', p0: { x: cx, y: ch.y }, p1: { x: cx, y: ch.y + ch.h } };
+}
+
+function nearestAccessDefault(k) {
+  /* 默认接入口：离第 k 台安装点最近的通道中心线垂足（须落在该通道内）。 */
+  const seg = blendSegs()[k];
+  if (!seg || !seg.point || !state.cable.channels.length) return null;
+  let best = null;
+  for (const ch of state.cable.channels) {
+    const sp = spineOf(ch);
+    const foot = sp.kind === 'H'
+      ? { x: clamp(seg.point.x, ch.x, ch.x + ch.w), y: sp.p0.y }
+      : { x: sp.p0.x, y: clamp(seg.point.y, ch.y, ch.y + ch.h) };
+    const d = Math.hypot(foot.x - seg.point.x, foot.y - seg.point.y);
+    if (!best || d < best.d) best = { x: foot.x, y: foot.y, d };
+  }
+  return best ? { x: best.x, y: best.y } : null;
+}
+
+function ensureCablingArrays(n) {
+  const c = state.cable;
+  while (c.devices.length < n) {
+    const k = c.devices.length;
+    c.devices.push({ access: nearestAccessDefault(k), maxLength: 20 });
+  }
+  c.devices.length = n;
+  // 已有点被拖出通道后不强制夹回（交给后端诊断）；缺失的补默认
+  c.devices.forEach((d, k) => {
+    if (!d.access) d.access = nearestAccessDefault(k);
+    d.maxLength = clamp(d.maxLength ?? 20, 0.1, 500);
+  });
+}
+
+function syncCabling(n) {
+  if (!state.cableEnabled) return;
+  const r = state.room;
+  const c = state.cable;
+  for (const ch of c.channels) {
+    ch.w = clamp(ch.w, 0.1, r.width);
+    ch.h = clamp(ch.h, 0.1, r.depth);
+    ch.x = clamp(ch.x, 0, r.width - ch.w);
+    ch.y = clamp(ch.y, 0, r.depth - ch.h);
+    ch.capacity = Math.max(1, Math.min(99, Math.round(ch.capacity ?? 1)));
+  }
+  if (c.cabinet) {
+    const cb = c.cabinet;
+    cb.w = clamp(cb.w, 0.1, r.width);
+    cb.h = clamp(cb.h, 0.1, r.depth);
+    cb.x = clamp(cb.x, 0, r.width - cb.w);
+    cb.y = clamp(cb.y, 0, r.depth - cb.h);
+  }
+  ensureCablingArrays(n);
+}
+
+function cablingPayload() {
+  const segs = blendSegs();
+  const c = state.cable;
+  return {
+    cabinet: c.cabinet ? { x: c.cabinet.x, y: c.cabinet.y, w: c.cabinet.w, h: c.cabinet.h } : null,
+    channels: c.channels.map(ch => ({
+      name: ch.name, x: ch.x, y: ch.y, w: ch.w, h: ch.h, capacity: ch.capacity,
+    })),
+    cabling: segs.map((seg, k) => ({
+      access: c.devices[k] && c.devices[k].access
+        ? { ...c.devices[k].access } : { x: 0, y: 0 },
+      max_length: c.devices[k] ? c.devices[k].maxLength : 20,
+    })),
+  };
+}
+
+function initCablingFromTemplate() {
+  const c = state.cable;
+  c.channels = [];
+  c.selectedChannelId = null;
+  const tpl = state.cableTemplate;
+  if (tpl && tpl.cabinet) {
+    c.cabinet = { id: uid(), ...tpl.cabinet };
+  } else {
+    c.cabinet = { id: uid(), x: state.room.width - 1.3, y: state.room.depth - 1.0,
+                  w: 1.0, h: 0.8 };
+  }
+  if (tpl && Array.isArray(tpl.channels)) {
+    tpl.channels.forEach((ch, i) => {
+      c.channels.push({ id: uid(), name: ch.name || `通道 ${i + 1}`,
+                        x: ch.x, y: ch.y, w: ch.w, h: ch.h,
+                        capacity: ch.capacity ?? 1 });
+    });
+  }
+  const n = blendSegs().length;
+  c.devices = [];
+  for (let k = 0; k < n; k++) {
+    const t = tpl && tpl.devices && tpl.devices[k];
+    c.devices.push({
+      access: t ? { x: t.access.x, y: t.access.y } : nearestAccessDefault(k),
+      maxLength: t ? t.max_length : 20,
+    });
+  }
+}
+
 function defaultSamplesForBand(k) {
   /* 依据当前第 k 带几何端点与两侧基准亮度，生成 5 个均匀采样（避开端点）。
      单侧实测用基准亮度叠加轻微边缘滚降，作为用户编辑的起点。 */
@@ -222,43 +341,38 @@ async function doCompute() {
       result = await res.json();
       resultById = {};
       for (const s of result.schemes) resultById[s.id] = s;
-    } else if (state.calEnabled) {
-      const res = await fetch('/api/calibrate', {
+    } else {
+      // 拼接模式：融合校准优先于布线，均未启用时为纯几何拼接
+      const useCal = state.calEnabled;
+      const useCable = state.cableEnabled && !useCal;
+      if (useCal) cableResult = null;   // 校准优先时本轮不刷新布线结果
+      calResult = useCal ? calResult : null;
+      const url = useCal ? '/api/calibrate' : (useCable ? '/api/cabling' : '/api/blend');
+      const body = useCable
+        ? { ...blendPayload(), ...cablingPayload() }
+        : blendPayload();
+      const res = await fetch(url, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(blendPayload()),
+        body: JSON.stringify(body),
       });
       if (!res.ok || seq !== computeSeq) {
         if (res.status === 400) {
-          // 400 为整体参数级错误：保留旧几何结果，错误在状态面板统一展示
           blendError = await res.json().catch(() => null);
-          calResult = null;
+          if (useCal) calResult = null;
+          if (useCable) cableResult = null;
         }
         render();
         return;
       }
       blendError = null;
       const data = await res.json();
-      blendResult = data.blend;
-      calResult = data.calibration;
-      const needInit = blendSegs().some(seg => !seg.point) &&
-                       blendResult.suggested_points &&
-                       ['ok', 'joint_conflict'].includes(blendResult.status);
-      if (needInit) adoptSuggested(false);
-    } else {
-      calResult = null;
-      const res = await fetch('/api/blend', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(blendPayload()),
-      });
-      if (!res.ok || seq !== computeSeq) {
-        if (res.status === 400) {
-          blendError = await res.json().catch(() => null);
-        }
-        render();
-        return;
+      if (useCal || useCable) {
+        blendResult = data.blend;
+        if (useCal) calResult = data.calibration;
+        if (useCable) cableResult = data.cabling;
+      } else {
+        blendResult = data;
       }
-      blendError = null;
-      blendResult = await res.json();
       // 初次求解（存在设备尚无安装点）时自动采纳服务器建议点，保持整体状态一致；
       // 用户拖动导致的 joint_conflict 保留用户当前点，由其点击「采纳建议点」
       // 或点击顶视图 × 标记，避免拖动松手后点位跳动。
@@ -267,6 +381,9 @@ async function doCompute() {
                        ['ok', 'joint_conflict'].includes(blendResult.status);
       if (needInit) {
         adoptSuggested(false);
+        // 安装点刚确定：布线/校准必须基于确定后的安装点再求解一次，
+        // 否则会停留在 points_missing / 缺当前点状态。
+        if (useCal || useCable) scheduleCompute();
       }
     }
     render();
@@ -350,6 +467,7 @@ function splitSegmentsEven(n) {
   state.blend.segments = segs;
   state.blend.selectedIdx = clamp(state.blend.selectedIdx, 0, n - 1);
   rebuildCalSamples();
+  if (state.cableEnabled) ensureCablingArrays(n);
 }
 
 /* 依据区间与示例模板重建校准采样（仅在结构变化时调用；编辑中不丢数据的
@@ -403,9 +521,19 @@ function enterBlendMode() {
     splitSegmentsEven(2);
     state.calEnabled = false;
   }
+  // 布线规划：示例携带配置则启用，否则保持上次开关并按当前设备数补齐
+  if (state.cableTemplate) {
+    state.cableEnabled = true;
+    initCablingFromTemplate();
+  } else {
+    ensureCablingArrays(blendSegs().length);
+  }
   document.getElementById('calEnabled').checked = state.calEnabled;
+  const cb = document.getElementById('cableEnabled');
+  if (cb) cb.checked = state.cableEnabled;
   document.getElementById('blendCount').value = String(blendSegs().length);
   applyModeChrome();
+  applyCablingChrome();
   onStateChange();
 }
 
@@ -413,6 +541,21 @@ function enterSingleMode() {
   state.mode = 'single';
   applyModeChrome();
   onStateChange();
+}
+
+function applyCablingChrome() {
+  const on = state.mode === 'blend' && state.cableEnabled;
+  const editor = document.getElementById('cableEditor');
+  if (editor) editor.hidden = !on;
+  state.drawChannelMode = false;
+  state.drawCabinetMode = false;
+  if (state.mode === 'blend') {
+    topSvg.classList.remove('drawing');
+    for (const id of ['drawChannelBtn', 'drawCabinetBtn']) {
+      const b = document.getElementById(id);
+      if (b) b.classList.remove('active');
+    }
+  }
 }
 
 function applyModeChrome() {
@@ -423,7 +566,9 @@ function applyModeChrome() {
   document.querySelectorAll('.mode-blend').forEach(n => { n.hidden = !blend; });
   document.getElementById('showAllWrap').style.display = blend ? 'none' : '';
   document.getElementById('topTitle').textContent = blend
-    ? '顶视图（多机拼接 · 虚线框=检修包络 · ○=当前安装点 · ×=服务器建议点 · 拖动任一点即时重算）'
+    ? (state.cableEnabled
+      ? '顶视图（多机拼接 + 布线规划 · 灰带=通道 · 紫框=机柜 · 菱形=接入口可拖 · 彩线=线缆路径）'
+      : '顶视图（多机拼接 · 虚线框=检修包络 · ○=当前安装点 · ×=服务器建议点 · 拖动任一点即时重算）')
     : '顶视图（单击/拖动设置安装点 · 拖动幕布与禁装区即时重算）';
   document.getElementById('sideTitle').textContent = blend
     ? '侧视图（多机拼接 · 各机镜头高度独立 · 拖动机身即时重算）'
@@ -660,6 +805,8 @@ function renderTopBlend() {
 
   drawRoom(svg, W, D, m);
 
+  renderCablingChannels(svg);
+
   if (blendResult && !blendResult.error) {
     // 非选中设备先画，选中设备最后画
     const order = [...segs.map((_, k) => k)]
@@ -706,6 +853,8 @@ function renderTopBlend() {
   }
 
   drawObstacles(svg);
+
+  renderCabinet(svg);
 
   // 幕布条 + 邻接重叠带（贴在前墙上）
   const xL = screenLeftX(), xR = xL + s.width;
@@ -798,6 +947,9 @@ function renderTopBlend() {
     }
   }
 
+  renderCablingRoutes(svg);
+  renderAccessPorts(svg);
+
   drawDim(svg, 0, D, W, D, 0.42, `房间宽 ${fmt(W)} m`, 'T');
   drawDim(svg, W, 0, W, D, -0.42, `进深 ${fmt(D)} m`, 'T');
 }
@@ -806,6 +958,133 @@ function renderTop() {
   topSvg.innerHTML = '';
   if (state.mode === 'single') renderTopSingle();
   else renderTopBlend();
+}
+
+/* ================= 顶视图（布线规划叠加） ================= */
+function renderCablingChannels(svg) {
+  if (state.mode !== 'blend' || !state.cableEnabled) return;
+  for (const ch of state.cable.channels) {
+    const isSel = ch.id === state.cable.selectedChannelId;
+    const g = el('g', {}, svg);
+    el('rect', {
+      x: ch.x, y: ch.y, width: ch.w, height: ch.h,
+      fill: '#868e96', 'fill-opacity': 0.12,
+      stroke: isSel ? '#5f3dc4' : '#868e96',
+      'stroke-width': isSel ? 0.03 : 0.016,
+      class: 'channel-rect',
+    }, g).addEventListener('pointerdown', e => {
+      state.cable.selectedChannelId = ch.id;
+      const w = svgWorld(svg, e);
+      startDrag(e, { type: 'channel', id: ch.id, dx: w.x - ch.x, dy: w.y - ch.y });
+      renderCablePanel();
+    });
+    // 中心线
+    const sp = spineOf(ch);
+    el('line', {
+      x1: sp.p0.x, y1: sp.p0.y, x2: sp.p1.x, y2: sp.p1.y,
+      stroke: isSel ? '#5f3dc4' : '#adb5bd', 'stroke-width': 0.014,
+      'stroke-dasharray': '0.12 0.07', 'stroke-opacity': 0.9,
+    }, g);
+    // 阻断段（后端给出）
+    if (cableResult) {
+      const ci = state.cable.channels.indexOf(ch);
+      const bs = (cableResult.blocked_channels || []).find(b => b.index === ci);
+      if (bs) {
+        for (const s of bs.spans) {
+          el('line', {
+            x1: s.from[0], y1: s.from[1], x2: s.to[0], y2: s.to[1],
+            stroke: '#e03131', 'stroke-width': 0.05, 'stroke-linecap': 'round',
+          }, g);
+        }
+      }
+    }
+    const occ = cableResult && cableResult.channels
+      ? cableResult.channels[state.cable.channels.indexOf(ch)] : null;
+    const occTxt = occ ? `（占用 ${occ.occupancy}/${ch.capacity}）` : `（容量 ${ch.capacity}）`;
+    textAt(g, ch.x + ch.w / 2, ch.y + ch.h / 2, `${ch.name}${occTxt}`,
+      0.11, isSel ? '#5f3dc4' : '#495057');
+    if (isSel) {
+      el('circle', { cx: ch.x + ch.w, cy: ch.y + ch.h, r: 0.07, class: 'resize-handle' }, g)
+        .addEventListener('pointerdown', e => startDrag(e, { type: 'channelresize', id: ch.id }));
+    }
+  }
+  // 通道/机柜绘制中的拖拽预览
+  if (drag && (drag.type === 'drawChannel' || drag.type === 'drawCabinet')) {
+    const x = Math.min(drag.x0, drag.x1), y = Math.min(drag.y0, drag.y1);
+    const w = Math.abs(drag.x1 - drag.x0), h = Math.abs(drag.y1 - drag.y0);
+    el('rect', {
+      x, y, width: w, height: h, fill: 'rgba(95,61,196,0.15)',
+      stroke: drag.type === 'drawCabinet' ? '#7048e8' : '#5f3dc4',
+      'stroke-width': 0.02, 'stroke-dasharray': '0.08 0.05',
+    }, svg);
+  }
+}
+
+function renderCabinet(svg) {
+  if (state.mode !== 'blend' || !state.cableEnabled) return;
+  const cb = state.cable.cabinet;
+  if (!cb) return;
+  const g = el('g', {}, svg);
+  el('rect', {
+    x: cb.x, y: cb.y, width: cb.w, height: cb.h,
+    fill: 'rgba(112,72,232,0.25)', stroke: '#5f3dc4', 'stroke-width': 0.025,
+    class: 'cabinet-rect',
+  }, g).addEventListener('pointerdown', e => {
+    const w = svgWorld(svg, e);
+    startDrag(e, { type: 'cabinet', dx: w.x - cb.x, dy: w.y - cb.y });
+  });
+  textAt(g, cb.x + cb.w / 2, cb.y + cb.h / 2, '机柜', 0.13, '#4c2db1');
+}
+
+function polylinePath(svg, pts, color, width, dashed, opacity = 1) {
+  if (!pts || pts.length < 2) return;
+  const d = pts.map((p, i) => `${i ? 'L' : 'M'} ${p[0]} ${p[1]}`).join(' ');
+  el('path', {
+    d, fill: 'none', stroke: color, 'stroke-width': width,
+    'stroke-linejoin': 'round', 'stroke-linecap': 'round',
+    'stroke-dasharray': dashed ? '0.14 0.09' : null,
+    'stroke-opacity': opacity,
+  }, svg);
+}
+
+function renderCablingRoutes(svg) {
+  if (state.mode !== 'blend' || !state.cableEnabled || !cableResult ||
+      !cableResult.routed || !cableResult.devices) return;
+  for (const d of cableResult.devices) {
+    const color = devColor(d.index);
+    // 接入段（点划线）
+    polylinePath(svg, d.access_path, color, 0.045, true, 0.95);
+    // 通道段（实线）
+    polylinePath(svg, d.path, color, 0.05, false, 0.9);
+    const last = d.path[d.path.length - 1];
+    textAt(svg, d.access[0], d.access[1] - 0.2,
+      `${d.index + 1}号线缆 ${fmt(d.length)}m`, 0.12, color);
+  }
+}
+
+function renderAccessPorts(svg) {
+  if (state.mode !== 'blend' || !state.cableEnabled) return;
+  const c = state.cable;
+  c.devices.forEach((d, k) => {
+    if (!d.access) return;
+    const color = devColor(k);
+    const failed = cableResult && cableResult.failed_devices &&
+      cableResult.failed_devices.some(f => f.index === k);
+    const g = el('g', { class: 'port-handle' }, svg);
+    el('polygon', {
+      points: `${d.access.x},${d.access[1] - 0.1} ${d.access[0] + 0.09},${d.access[1]} ` +
+              `${d.access.x},${d.access[1] + 0.1} ${d.access.x - 0.09},${d.access[1]}`,
+      fill: failed ? '#e03131' : '#fff', stroke: failed ? '#c92a2a' : color,
+      'stroke-width': 0.025,
+    }, g);
+    g.addEventListener('pointerdown', e => {
+      state.blend.selectedIdx = k;
+      startDrag(e, { type: 'aport', idx: k });
+      render();
+    });
+    textAt(svg, d.access.x + 0.14, d.access[1] + 0.02, `${k + 1}接入口`,
+      0.1, failed ? '#c92a2a' : color, 'start');
+  });
 }
 
 /* ================= 侧视图（单机） ================= */
@@ -1309,6 +1588,164 @@ function renderPointInfoSingle() {
   box.innerHTML = html;
 }
 
+/* ================= 面板：布线规划 ================= */
+function renderCablePanel() {
+  const card = document.getElementById('cableCard');
+  if (state.mode !== 'blend') { card.hidden = true; return; }
+  card.hidden = false;
+  const on = state.cableEnabled;
+  document.getElementById('cableEditor').hidden = !on;
+  document.getElementById('cableEnabled').checked = on;
+  if (!on) return;
+
+  const c = state.cable;
+  // 机柜字段
+  const grid = document.getElementById('cableCabinetGrid');
+  grid.hidden = !c.cabinet;
+  // 通道列表
+  const list = document.getElementById('cableChannelList');
+  list.innerHTML = '';
+  c.channels.forEach((ch, i) => {
+    const row = document.createElement('div');
+    row.className = 'cable-ch-item' + (ch.id === c.selectedChannelId ? ' selected' : '');
+    const ce = cableResult && cableResult.channels ? cableResult.channels[i] : null;
+    const bad = ce && ce.blocked;
+    row.innerHTML =
+      `<span class="cable-dot${bad ? ' bad' : ''}"></span>` +
+      `<input type="text" class="cable-name" data-i="${i}" value="${esc(ch.name)}">` +
+      `<span class="dim">${fmt(ch.w)}×${fmt(ch.h)}m</span>` +
+      `<label class="cap">容量<input type="number" min="1" max="99" step="1"
+         data-i="${i}" class="cable-cap" value="${ch.capacity}"></label>`;
+    if (ce) {
+      row.innerHTML += `<span class="dim${ce.occupancy > ch.capacity ? ' bad' : ''}">` +
+        `${ce.occupancy}/${ch.capacity}</span>`;
+    }
+    row.addEventListener('click', () => { c.selectedChannelId = ch.id; renderCablePanel(); });
+    list.appendChild(row);
+  });
+  list.querySelectorAll('.cable-name').forEach(inp => {
+    inp.addEventListener('input', () => {
+      c.channels[+inp.dataset.i].name = inp.value;
+    });
+  });
+  list.querySelectorAll('.cable-cap').forEach(inp => {
+    inp.addEventListener('input', () => {
+      const v = parseInt(inp.value, 10);
+      if (Number.isFinite(v)) {
+        c.channels[+inp.dataset.i].capacity = Math.max(1, v);
+        onStateChange();
+      }
+    });
+  });
+  document.getElementById('delChannelBtn').disabled = !c.selectedChannelId;
+
+  // 每台设备：接入口坐标 + 最长线缆 + 结果长度
+  const box = document.getElementById('cableDevList');
+  let html = '';
+  const segs = blendSegs();
+  segs.forEach((seg, k) => {
+    const color = devColor(k);
+    const d = c.devices[k] || {};
+    const cr = cableResult && cableResult.devices ? cableResult.devices[k] : null;
+    const fd = cableResult && cableResult.failed_devices
+      ? cableResult.failed_devices.find(f => f.index === k) : null;
+    const lenTxt = cr ? `<b>${fmt(cr.length)}m</b> / 最长 ${fmt(d.maxLength)}m`
+                      : `最长 ${fmt(d.maxLength || 20)}m`;
+    html += `<div class="cable-dev" style="border-left-color:${color}">
+      <div class="cable-dev-head">
+        <b style="color:${color}">${k + 1}号机</b><span class="dim">${lenTxt}</span>
+      </div>
+      <div class="form-grid">
+        <label>接入口 X<input type="number" step="0.05" data-k="${k}" data-f="ax"
+          value="${d.access ? fmt(d.access.x) : ''}"></label>
+        <label>接入口 Y<input type="number" step="0.05" data-k="${k}" data-f="ay"
+          value="${d.access ? fmt(d.access.y) : ''}"></label>
+        <label class="span2">最长线缆 (m)<input type="number" step="0.5" min="0.1"
+          data-k="${k}" data-f="ml" value="${fmt(d.maxLength || 20)}"></label>
+      </div>
+      ${cr ? `<div class="ok-box cable-line">✅ 接入段 ${fmt(cr.access_length)}m ＋ 通道段 ${fmt(cr.channel_length)}m，
+         用通道 ${cr.channels.map(i => esc(c.channels[i] ? c.channels[i].name : `#${i + 1}`)).join('、')}</div>` : ''}
+      ${fd ? `<div class="diag-box cable-line">❌ ${fd.reasons.map(esc).join('；')}</div>` : ''}
+    </div>`;
+  });
+  box.innerHTML = html;
+  box.querySelectorAll('input[data-k]').forEach(inp => {
+    inp.addEventListener('input', () => {
+      const k = +inp.dataset.k, f = inp.dataset.f;
+      const v = parseFloat(inp.value);
+      if (!Number.isFinite(v)) return;
+      const d = c.devices[k] || (c.devices[k] = { access: null, maxLength: 20 });
+      if (f === 'ml') d.maxLength = v;
+      else {
+        d.access = d.access || { x: 0, y: 0 };
+        if (f === 'ax') d.access.x = v; else d.access.y = v;
+      }
+      onStateChange();
+    });
+  });
+
+  // 机柜字段绑定（数值）
+  syncCabinetInputs();
+}
+
+function syncCabinetInputs() {
+  const c = state.cable;
+  const cb = c.cabinet;
+  const map = [['cabX', 'x'], ['cabY', 'y'], ['cabW', 'w'], ['cabH', 'h']];
+  for (const [id, key] of map) {
+    const inp = document.getElementById(id);
+    if (inp && document.activeElement !== inp && cb) inp.value = fmt(cb[key]);
+  }
+}
+
+function renderCableStatusHtml() {
+  if (state.mode !== 'blend' || !state.cableEnabled) return '';
+  let html = '<h2 style="margin-top:10px">投影机布线规划</h2>';
+  if (!cableResult) return html + '<p class="hint">布线计算中…</p>';
+  if (cableResult.status === 'blend_invalid' || cableResult.status === 'points_missing') {
+    return html + `<div class="diag-box">⏳ ${esc(cableResult.diagnostics[0] ||
+      '等待拼接校核通过并确定全部安装点')}</div>`;
+  }
+  if (cableResult.status === 'ok') {
+    html += `<div class="ok-box">✅ 全部 ${cableResult.count} 台设备均可接入机柜，` +
+      `联合布线总长度 <b>${fmt(cableResult.total_length)}m</b>（总长度最短方案，同长按设备顺序稳定）。</div>`;
+    html += '<table class="checks" style="margin-top:6px">';
+    for (const d of cableResult.devices) {
+      html += `<tr><td class="ico"><span style="color:${devColor(d.index)};font-weight:700">${d.index + 1}</span></td>` +
+        `<td class="cname">${esc(d.name)}</td>` +
+        `<td>总长 <b>${fmt(d.length)}m</b>（接入 ${fmt(d.access_length)}m ＋ 通道 ${fmt(d.channel_length)}m），上限 ${fmt(d.max_length)}m</td></tr>`;
+    }
+    html += '</table><table class="checks"><tr><td class="cname">通道占用</td><td>占用/容量</td></tr>';
+    cableResult.channels.forEach((ch, i) => {
+      html += `<tr><td class="ico">${ch.blocked ? '🚧' : '▭'}</td><td class="cname">${esc(ch.name)}</td>` +
+        `<td class="${ch.occupancy > ch.capacity ? 'bad' : ''}">${ch.occupancy}/${ch.capacity}` +
+        (ch.blocked ? `（阻断：${ch.blockers.map(esc).join('、')}）` : '') + '</td></tr>';
+    });
+    html += '</table>';
+    return html;
+  }
+  // no_joint_solution：无联合解，不返回部分布线
+  html += '<div class="diag-box">❌ 不存在让全部设备同时接入机柜的联合布线，' +
+    '<b>不返回任何部分布线</b>。请调整接入口/通道/容量后重试：</div>';
+  if (cableResult.failed_devices.length) {
+    html += '<div class="diag-box" style="margin-top:6px"><b>失败设备：</b><ul>' +
+      cableResult.failed_devices.map(f =>
+        `<li>${f.index + 1} 号机：${f.reasons.map(esc).join('；')}</li>`).join('') +
+      '</ul></div>';
+  }
+  if (cableResult.blocked_channels.length) {
+    html += '<div class="diag-box" style="margin-top:6px"><b>阻断通道：</b><ul>' +
+      cableResult.blocked_channels.map(b =>
+        `<li>${esc(b.name)}：${b.reasons.map(esc).join('；')}</li>`).join('') +
+      '</ul></div>';
+  }
+  if (cableResult.diagnostics.length) {
+    html += '<div class="diag-box" style="margin-top:6px"><ul>' +
+      cableResult.diagnostics.map(d => `<li>${esc(d)}</li>`).join('') + '</ul></div>';
+  }
+  return html;
+}
+
 /* ================= 面板：融合校准采样表 ================= */
 function renderCalSamplesCard() {
   const card = document.getElementById('calSamplesCard');
@@ -1471,6 +1908,7 @@ function renderPointInfoBlend() {
   }
 
   html += renderCalStatusHtml(segs);
+  if (state.cableEnabled) html += renderCableStatusHtml();
   box.innerHTML = html;
   const btn = document.getElementById('adoptBtn');
   if (btn) btn.addEventListener('click', () => adoptSuggested(true));
@@ -1674,6 +2112,55 @@ function bindAllInputs() {
     onStateChange();
   });
 
+  /* ---- 投影机布线规划 ---- */
+  document.getElementById('cableEnabled').addEventListener('change', e => {
+    state.cableEnabled = e.target.checked;
+    if (state.cableEnabled) {
+      if (!state.cable.cabinet && !state.cableTemplate) {
+        state.cable.cabinet = { id: uid(),
+          x: state.room.width - 1.3, y: state.room.depth - 1.0, w: 1.0, h: 0.8 };
+      }
+      ensureCablingArrays(blendSegs().length);
+    }
+    applyCablingChrome();
+    cableResult = null;
+    onStateChange();
+  });
+  for (const [id, key] of [['cabX', 'x'], ['cabY', 'y'], ['cabW', 'w'], ['cabH', 'h']]) {
+    document.getElementById(id).addEventListener('input', e => {
+      const v = parseFloat(e.target.value);
+      if (Number.isFinite(v) && state.cable.cabinet) {
+        state.cable.cabinet[key] = v;
+        onStateChange();
+      }
+    });
+  }
+  const setDraw = (which) => {
+    state.drawMode = false;
+    state.drawChannelMode = which === 'channel';
+    state.drawCabinetMode = which === 'cabinet';
+    document.getElementById('drawBtn').classList.remove('active');
+    document.getElementById('drawChannelBtn')
+      .classList.toggle('active', state.drawChannelMode);
+    document.getElementById('drawCabinetBtn')
+      .classList.toggle('active', state.drawCabinetMode);
+    topSvg.classList.toggle('drawing',
+      state.drawChannelMode || state.drawCabinetMode);
+    state.cable.selectedChannelId = null;
+    render();
+  };
+  document.getElementById('drawChannelBtn').addEventListener('click', () =>
+    setDraw(state.drawChannelMode ? null : 'channel'));
+  document.getElementById('drawCabinetBtn').addEventListener('click', () =>
+    setDraw(state.drawCabinetMode ? null : 'cabinet'));
+  document.getElementById('delChannelBtn').addEventListener('click', () => {
+    const id = state.cable.selectedChannelId;
+    if (!id) return;
+    state.cable.channels = state.cable.channels.filter(ch => ch.id !== id);
+    state.cable.selectedChannelId = null;
+    onStateChange();
+  });
+
   /* ---- 拼接设备编辑 ---- */
   bindNum('bschU0', () => B()?.u0, v => { const g = B(); if (g) g.u0 = v; });
   bindNum('bschU1', () => B()?.u1, v => { const g = B(); if (g) g.u1 = v; });
@@ -1738,6 +2225,16 @@ function attachViewHandlers() {
     const W = state.room.width, D = state.room.depth;
     if (state.drawMode) {
       drag = { type: 'draw', x0: clamp(p.x, 0, W), y0: clamp(p.y, 0, D), x1: clamp(p.x, 0, W), y1: clamp(p.y, 0, D) };
+      onStateChange();
+      return;
+    }
+    if (state.mode === 'blend' &&
+        (state.drawChannelMode || state.drawCabinetMode)) {
+      drag = {
+        type: state.drawChannelMode ? 'drawChannel' : 'drawCabinet',
+        x0: clamp(p.x, 0, W), y0: clamp(p.y, 0, D),
+        x1: clamp(p.x, 0, W), y1: clamp(p.y, 0, D),
+      };
       onStateChange();
       return;
     }
@@ -1833,6 +2330,30 @@ function attachViewHandlers() {
       } else if (drag.type === 'draw') {
         drag.x1 = clamp(p.x, 0, W);
         drag.y1 = clamp(p.y, 0, D);
+      } else if (drag.type === 'channel') {
+        const ch = state.cable.channels.find(o => o.id === drag.id);
+        if (ch) {
+          ch.x = clamp(p.x - drag.dx, 0, W - ch.w);
+          ch.y = clamp(p.y - drag.dy, 0, D - ch.h);
+        }
+      } else if (drag.type === 'channelresize') {
+        const ch = state.cable.channels.find(o => o.id === drag.id);
+        if (ch) {
+          ch.w = clamp(p.x - ch.x, 0.1, W - ch.x);
+          ch.h = clamp(p.y - ch.y, 0.1, D - ch.y);
+        }
+      } else if (drag.type === 'cabinet') {
+        const cb = state.cable.cabinet;
+        if (cb) {
+          cb.x = clamp(p.x - drag.dx, 0, W - cb.w);
+          cb.y = clamp(p.y - drag.dy, 0, D - cb.h);
+        }
+      } else if (drag.type === 'aport') {
+        const d = state.cable.devices[drag.idx];
+        if (d) d.access = { x: clamp(p.x, 0, W), y: clamp(p.y, 0, D) };
+      } else if (drag.type === 'drawChannel' || drag.type === 'drawCabinet') {
+        drag.x1 = clamp(p.x, 0, W);
+        drag.y1 = clamp(p.y, 0, D);
       }
     }
     onStateChange();
@@ -1848,6 +2369,24 @@ function attachViewHandlers() {
         state.obstacles.push(ob);
         state.selectedObstacleId = ob.id;
       }
+    } else if (drag.type === 'drawChannel' || drag.type === 'drawCabinet') {
+      const x = Math.min(drag.x0, drag.x1), y = Math.min(drag.y0, drag.y1);
+      const w = Math.abs(drag.x1 - drag.x0), h = Math.abs(drag.y1 - drag.y0);
+      if (w > 0.08 && h > 0.08) {
+        if (drag.type === 'drawChannel') {
+          const ch = { id: uid(), name: `通道 ${state.cable.channels.length + 1}`,
+                       x, y, w, h, capacity: 1 };
+          state.cable.channels.push(ch);
+          state.cable.selectedChannelId = ch.id;
+        } else {
+          state.cable.cabinet = { id: uid(), x, y, w, h };
+        }
+      }
+      state.drawChannelMode = false;
+      state.drawCabinetMode = false;
+      document.getElementById('drawChannelBtn').classList.remove('active');
+      document.getElementById('drawCabinetBtn').classList.remove('active');
+      topSvg.classList.remove('drawing');
     }
     drag = null;
     onStateChange();
@@ -1868,6 +2407,7 @@ function render() {
   renderObstacleList();
   if (state.mode === 'single') renderPointInfoSingle();
   else { renderCalSamplesCard(); renderPointInfoBlend(); }
+  renderCablePanel();
   syncInputs();
 }
 
@@ -1881,11 +2421,20 @@ function applyState(data) {
   state.selectedObstacleId = null;
   state.blendTemplate = data.blend || null;
   state.calTemplate = data.calibration || null;
+  state.cableTemplate = data.cabling || null;
   state.blend.segments = [];
   state.blend.selectedIdx = 0;
   state.calSamples = [];
   state.calEnabled = false;
+  state.cableEnabled = false;
+  state.cable.cabinet = null;
+  state.cable.channels = [];
+  state.cable.devices = [];
+  state.cable.selectedChannelId = null;
+  state.drawChannelMode = false;
+  state.drawCabinetMode = false;
   calResult = null;
+  cableResult = null;
   blendError = null;
   blendResult = null;
   result = null;

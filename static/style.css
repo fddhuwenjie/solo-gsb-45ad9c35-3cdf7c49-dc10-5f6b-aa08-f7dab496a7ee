@@ -171,3 +171,41 @@ table.cal-table tr.cal-row-bad input { border-color: #ffa8a8; background: #fff5f
 /* SVG 文本 */
 text { font-family: system-ui, "PingFang SC", "Microsoft YaHei", sans-serif; pointer-events: none; user-select: none; }
 text.halo { paint-order: stroke; stroke: #fff; stroke-width: 3px; stroke-linejoin: round; }
+
+/* 投影机布线规划 */
+.cable-tools { display: flex; gap: 6px; margin: 6px 0; flex-wrap: wrap; }
+.cable-tools button {
+  font-size: 12px; padding: 4px 9px; border-radius: 5px;
+  border: 1px solid #adb5bd; background: #f1f3f5; cursor: pointer; color: #212529;
+}
+.cable-tools button:hover { background: #e9ecef; }
+.cable-tools button.active { background: #5f3dc4; color: #fff; border-color: #4c2db1; }
+.cable-channel-list { display: flex; flex-direction: column; gap: 4px; margin: 6px 0; }
+.cable-ch-item {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 7px; border: 1px solid #dee2e6; border-radius: 6px; background: #fbfcfd;
+}
+.cable-ch-item.selected { border-color: #5f3dc4; background: #f3f0ff; box-shadow: inset 0 0 0 1px #5f3dc4; }
+.cable-dot {
+  width: 10px; height: 10px; border-radius: 2px; flex: 0 0 auto;
+  background: repeating-linear-gradient(45deg, #868e96 0 2px, #fff 2px 4px);
+  border: 1px solid #868e96;
+}
+.cable-dot.bad { background: repeating-linear-gradient(45deg, #e03131 0 2px, #fff 2px 4px); border-color: #e03131; }
+.cable-ch-item .cable-name {
+  flex: 1 1 auto; min-width: 0; border: none; background: transparent;
+  font-size: 12px; font-weight: 600; padding: 2px;
+}
+.cable-ch-item .cable-name:focus { border-color: #1971c2; background: #fff; }
+.cable-ch-item .cap { display: flex; align-items: center; gap: 3px; font-size: 10.5px; color: #868e96; }
+.cable-ch-item .cap input { width: 46px; padding: 2px 4px; }
+.cable-ch-item .dim.bad, .cable-dev .dim.bad { color: #c92a2a; font-weight: 700; }
+.cable-dev {
+  border: 1px solid #dee2e6; border-left: 4px solid #868e96;
+  border-radius: 6px; padding: 6px 8px; margin-top: 6px; background: #fbfcfd;
+}
+.cable-dev-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+.cable-line { margin-top: 5px; font-size: 11px; }
+.channel-rect { cursor: move; }
+.cabinet-rect { cursor: move; }
+.port-handle { cursor: move; }

@@ -1,6 +1,7 @@
 """会议室投影机选位工作台 — Flask 后端。"""
 from flask import Flask, jsonify, render_template, request
 
+import cabling
 import calibration
 import geometry
 from examples import EXAMPLES
@@ -144,6 +145,94 @@ def api_calibrate():
         cal["predictions"] = None
         cal["blend_diagnostics"] = blend["diagnostics"]
     return jsonify({"blend": blend, "calibration": cal})
+
+
+@app.post("/api/cabling")
+def api_cabling():
+    """投影机布线规划联合求解（多机拼接工作台）。
+
+    入参包含 /api/blend 的几何字段（room/screen/segments/obstacles/
+    points/lens_heights），另加：
+      cabinet:  {x,y,w,h} 机柜矩形（顶视图）
+      channels: [{name?,x,y,w,h,capacity}] 相交矩形可走线通道及容量
+                （capacity = 可同时容纳的线缆条数，≥1 的整数）
+      cabling:  [{access:{x,y}, max_length}] × N，每台设备指定通道
+                接入口与最长线缆长度（米）
+    系统先复用 /api/blend 做拼接校核，再为每台设备规划“安装点→接入口
+    避障接入段 + 沿通道中心线到机柜”的联合布线；接入段与通道不得穿过
+    禁装区、机柜或其他设备的机身检修包络；线缆共用通道但占用数不超
+    容量。全部可接入时取总长度最短、同长按设备顺序稳定的方案；无联合
+    解时不返回任何部分布线，仅返回失败设备与阻断通道。
+    """
+    data = request.get_json(force=True, silent=False)
+    try:
+        room = data["room"]
+        screen = data["screen"]
+        obstacles = data.get("obstacles", [])
+        segments = data["segments"]
+        if not (geometry.BLEND_MIN <= len(segments) <= geometry.BLEND_MAX):
+            return jsonify({
+                "error": f"设备数量必须为 {geometry.BLEND_MIN}~"
+                         f"{geometry.BLEND_MAX} 台（当前 {len(segments)} 台）",
+            }), 400
+        for seg in segments:
+            scheme = seg["scheme"]
+            float(scheme["u0"])
+            float(scheme["u1"])
+            float(seg.get("min_overlap", 0.0))
+            float(seg.get("clearance", 0.0))
+        points = data.get("points")
+        lens_heights = data.get("lens_heights")
+        if points is not None and len(points) != len(segments):
+            return jsonify({"error": "points 数量必须与设备数量一致"}), 400
+        if lens_heights is not None and len(lens_heights) != len(segments):
+            return jsonify({"error": "lens_heights 数量必须与设备数量一致"}), 400
+
+        cabinet = data.get("cabinet")
+        channels = data.get("channels")
+        dev_specs = data.get("cabling")
+        if not isinstance(cabinet, dict):
+            return jsonify({"error": "缺少 cabinet（机柜 {x,y,w,h}）"}), 400
+        if not isinstance(channels, list) or not channels:
+            return jsonify({"error": "缺少 channels（可走线通道网络，至少 1 个）"}), 400
+        if not isinstance(dev_specs, list) or len(dev_specs) != len(segments):
+            return jsonify({"error": "cabling 数量必须与设备数量一致"
+                            "（每项 {access:{x,y}, max_length}）"}), 400
+
+        cabinet = {k: float(cabinet[k]) for k in ("x", "y", "w", "h")}
+        if cabinet["w"] <= 0 or cabinet["h"] <= 0:
+            return jsonify({"error": "机柜宽深必须为正"}), 400
+
+        chans = []
+        for i, ch in enumerate(channels):
+            if not isinstance(ch, dict):
+                raise TypeError(f"channels[{i}] 必须为对象")
+            r = {"x": float(ch["x"]), "y": float(ch["y"]),
+                 "w": float(ch["w"]), "h": float(ch["h"]),
+                 "capacity": int(ch["capacity"]),
+                 "name": ch.get("name") or f"通道 {i + 1}"}
+            if r["w"] <= 0 or r["h"] <= 0:
+                raise ValueError(f"通道 {i + 1} 的宽深必须为正")
+            if r["capacity"] < 1:
+                raise ValueError(f"通道 {i + 1} 的容量必须 ≥1")
+            chans.append(r)
+
+        specs = []
+        for i, d in enumerate(dev_specs):
+            acc = d["access"]
+            specs.append({"access": {"x": float(acc["x"]), "y": float(acc["y"])},
+                          "max_length": float(d["max_length"])})
+            if specs[-1]["max_length"] <= 0:
+                raise ValueError(f"设备 {i + 1} 的最长线缆长度必须为正")
+
+        blend = geometry.compute_blend(
+            room, screen, segments, obstacles, points, lens_heights)
+        result = cabling.compute_cabling(
+            blend, segments, room, obstacles, points or [None] * len(segments),
+            cabinet, chans, specs)
+    except (KeyError, TypeError, ValueError) as exc:
+        return jsonify({"error": f"参数无效: {exc}"}), 400
+    return jsonify({"blend": blend, "cabling": result})
 
 
 if __name__ == "__main__":

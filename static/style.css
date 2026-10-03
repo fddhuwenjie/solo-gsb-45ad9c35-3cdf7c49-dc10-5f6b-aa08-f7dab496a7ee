@@ -168,6 +168,22 @@ table.cal-table tr.cal-row-bad input { border-color: #ffa8a8; background: #fff5f
 }
 .cal-del:hover { color: #e03131; }
 
+/* 投影机布线规划 */
+.wiring-actions { display: flex; gap: 6px; margin: 8px 0 6px; }
+.wiring-actions button {
+  flex: 1; font-size: 12px; padding: 5px 8px; border-radius: 5px;
+  border: 1px solid #adb5bd; background: #f1f3f5; cursor: pointer; color: #212529;
+}
+.wiring-actions button:hover:not(:disabled) { background: #e9ecef; }
+.wiring-actions button:disabled { opacity: 0.45; cursor: not-allowed; }
+.ch-dot { width: 10px; height: 10px; background: repeating-linear-gradient(-45deg, #1971c2 0 2px, #fff 2px 4px); border: 1px solid #1971c2; flex: 0 0 auto; }
+.ch-rect { cursor: move; }
+.port-handle { cursor: move; }
+#channelList .ch-cap { width: 52px; padding: 2px 4px; margin-left: 6px; font-size: 11px; }
+#channelList .dim.bad { color: #c92a2a; font-weight: 700; }
+#wiringDevBox input[type="number"] { width: 74px; padding: 3px 5px; display: inline-block; }
+#wiringDevBox .cname { white-space: normal; }
+
 /* SVG 文本 */
 text { font-family: system-ui, "PingFang SC", "Microsoft YaHei", sans-serif; pointer-events: none; user-select: none; }
 text.halo { paint-order: stroke; stroke: #fff; stroke-width: 3px; stroke-linejoin: round; }

@@ -3,6 +3,7 @@ from flask import Flask, jsonify, render_template, request
 
 import calibration
 import geometry
+import wiring
 from examples import EXAMPLES
 
 app = Flask(__name__)
@@ -144,6 +145,55 @@ def api_calibrate():
         cal["predictions"] = None
         cal["blend_diagnostics"] = blend["diagnostics"]
     return jsonify({"blend": blend, "calibration": cal})
+
+
+@app.post("/api/wiring")
+def api_wiring():
+    """多机投影机布线规划。
+
+    入参：
+      devices: 2~3 项，每项
+        {name, point:{x,y}, access:{x,y}, max_length,
+         body_w, body_d, clearance}
+        point  为已通过拼接校核的安装点（镜头坐标）；
+        access 为用户指定的通道接入口；max_length 为最长线缆长度；
+        body_w/body_d/clearance 用于构造该台机身检修包络（其他设备的
+        接入段与通道段不得穿过）。
+      cabinet:   {x,y} 机柜位置
+      channels:  [{name,x,y,w,h,capacity}] 由相交矩形组成的可走线通道，
+                 capacity 为可共线线缆数上限
+      obstacles: [{name,x,y,w,h}] 房间禁装区（顶视图，同 /api/compute）
+    返回 status、每台完整路径/长度、通道占用；无联合解时 routes=null，
+    仅返回失败设备与阻断通道明细（不返回部分布线）。
+    """
+    data = request.get_json(force=True, silent=False)
+    try:
+        devices = data["devices"]
+        cabinet = data["cabinet"]
+        channels = data.get("channels", [])
+        obstacles = data.get("obstacles", [])
+        if not (geometry.BLEND_MIN <= len(devices) <= geometry.BLEND_MAX):
+            return jsonify({
+                "error": f"设备数量必须为 {geometry.BLEND_MIN}~"
+                         f"{geometry.BLEND_MAX} 台（当前 {len(devices)} 台）",
+            }), 400
+        for i, d in enumerate(devices):
+            d["point"]["x"], d["point"]["y"] = float(d["point"]["x"]), float(d["point"]["y"])
+            d["access"]["x"], d["access"]["y"] = float(d["access"]["x"]), float(d["access"]["y"])
+            float(d["max_length"])
+            float(d["body_w"]); float(d["body_d"])
+            float(d.get("clearance", 0.0))
+        float(cabinet["x"]); float(cabinet["y"])
+        for i, ch in enumerate(channels):
+            float(ch["x"]); float(ch["y"])
+            float(ch["w"]); float(ch["h"])
+            cap = float(ch.get("capacity", 1))
+            if cap != int(cap) or cap < 1:
+                raise ValueError(f"通道 {i + 1} 容量必须为 ≥1 的整数")
+        result = wiring.compute_wiring(devices, cabinet, channels, obstacles)
+    except (KeyError, TypeError, ValueError) as exc:
+        return jsonify({"error": f"参数无效: {exc}"}), 400
+    return jsonify(result)
 
 
 if __name__ == "__main__":

@@ -100,6 +100,29 @@
       <button id="calSamplesBtn" class="wide" hidden title="按当前各重叠带坐标与基准亮度生成 5 个均匀采样（可随后编辑实测值）">✦ 生成/重置默认采样</button>
     </section>
 
+    <section class="card mode-blend" id="wiringSwitchCard" hidden>
+      <h2>投影机布线规划</h2>
+      <label class="chk"><input type="checkbox" id="wiringEnabled"> 启用布线规划</label>
+      <p class="hint">为每台指定通道接入口（顶视图 ◆ 可拖）与最长线缆，沿相交矩形通道的中心线走线到机柜；接入段与通道均避开禁装区和其他设备的机身检修包络，通道占用不超过容量。无联合解时不返回部分布线。</p>
+      <div id="wiringSetup" hidden>
+        <div class="form-grid">
+          <label>机柜 X (m)<input type="number" id="cabX" step="0.05"></label>
+          <label>机柜 Y (m)<input type="number" id="cabY" step="0.05"></label>
+        </div>
+        <div class="wiring-actions">
+          <button type="button" id="drawChannelBtn" title="在顶视图拖拽绘制走线通道矩形">▦ 绘制通道</button>
+          <button type="button" id="delChannelBtn" title="删除当前选中的通道" disabled>🗑 删除通道</button>
+        </div>
+        <ul id="channelList" class="obstacle-list"></ul>
+      </div>
+    </section>
+
+    <section class="card mode-blend" id="wiringDevCard" hidden>
+      <h2>各机接入口 / 最长线缆</h2>
+      <div id="wiringDevBox"></div>
+      <p class="hint">拖动顶视图中的 ◆ 标记可改变该台接入口；接入段（安装点→接入口）自动避障，再沿通道中心线到机柜。</p>
+    </section>
+
     <section class="card mode-blend" hidden>
       <h2>拼接设备（按从左到右顺序）</h2>
       <ul id="blendList" class="scheme-list"></ul>
